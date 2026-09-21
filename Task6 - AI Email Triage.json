@@ -1,0 +1,2485 @@
+{
+  "name": "Task6 - AI Email Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {},
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -960,
+        0
+      ],
+      "id": "b0dc6744-8b02-46d6-aca8-34499a6221f2",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "wC9WzILzlNGljVDT",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nfunction cleanBody(text) {\n  if (!text) return \"\";\n  let cleaned = text.split(/\\nOn .* wrote:\\n/)[0];\n  cleaned = cleaned.split(/\\n>+/)[0];\n  return cleaned.trim();\n}\n\nfunction escapeForJson(str) {\n  return JSON.stringify(str).slice(1, -1);\n}\n\nconst cleanedBody = cleanBody(item.text || item.textAsHtml || \"\");\n\nreturn {\n  json: {\n    gmail_id: item.id,                          // NEW: internal Gmail ID for API actions\n    message_id: item.messageId || item.id,       // RFC Message-ID, for logging/threading reference\n    thread_id: item.threadId,\n    sender_name: item.from?.value?.[0]?.name || \"\",\n    sender_email: item.from?.value?.[0]?.address || \"\",\n    subject: item.subject || \"\",\n    body: cleanedBody,\n    subject_escaped: escapeForJson(item.subject || \"\"),\n    sender_email_escaped: escapeForJson(item.from?.value?.[0]?.address || \"\"),\n    body_escaped: escapeForJson(cleanedBody),\n    timestamp: item.date,\n    has_attachments: !!(item.attachments && item.attachments.length > 0),\n    attachments: item.attachments || []\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -816,
+        0
+      ],
+      "id": "9601fd87-ad13-4319-8c59-5afb7518ed24",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "__regex": "https:\\/\\/(?:drive|docs)\\.google\\.com(?:\\/.*|)\\/d\\/([0-9a-zA-Z\\-_]+)(?:\\/.*|)"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "message_id",
+              "lookupValue": "=   ={{ $json.message_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -656,
+        -16
+      ],
+      "id": "b8d7ca87-f710-4e83-aeef-d36a5e47046d",
+      "name": "Get row(s) in sheet",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d7e05b31-aeed-44b7-9345-cdac3637dbfe",
+              "leftValue": "={{ $json.message_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -480,
+        -16
+      ],
+      "id": "17152001-d80c-4a2e-b822-3d3c9d6b0cce",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"openai/gpt-oss-20b\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an email classification engine for a real estate company inbox. Classify the email into exactly one category, assign a priority, and decide if human review is required. Important edge cases: (1) Legitimate transactional notifications from banks, payment processors, or service providers (e.g. UBL, HBL, PayPal, Stripe transaction alerts, OTPs, bill reminders) are NOT spam or promotional, even if they contain standard fraud-warning boilerplate text — classify these as 'other' with low priority and requires_human=false. (2) Only classify as 'spam' if the email is unsolicited bulk mail, phishing with suspicious links/sender mismatch, or clearly irrelevant mass marketing (e.g. LinkedIn network suggestions, newsletters you didn't request). (3) Classify as 'promotional' only for legitimate marketing/sales emails from known senders, not phishing. When in doubt between spam and other, prefer 'other' with lower confidence rather than aggressively marking as spam — the system must never delete a legitimate business email. Respond with ONLY valid JSON, no markdown, no explanation. Schema: {\\\"category\\\": one of [general_query, sales_inquiry, job_application, project_related, internal_communication, meeting_request, urgent_request, complaint, promotional, spam, other], \\\"priority\\\": one of [low, medium, high, critical], \\\"requires_human\\\": true or false, \\\"confidence\\\": number between 0 and 1, \\\"reasoning\\\": short string}\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Subject: {{ $('Code in JavaScript').item.json.subject_escaped }}\\n\\nFrom: {{ $('Code in JavaScript').item.json.sender_email_escaped }}\\n\\nBody:\\n{{ $('Code in JavaScript').item.json.body_escaped }}\"\n    }\n  ],\n  \"temperature\": 0.2,\n  \"response_format\": { \"type\": \"json_object\" }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -240,
+        -32
+      ],
+      "id": "3520d260-16c2-43be-828b-b76ba64215cc",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "9CuY4UOpNzCBrALs",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst raw = response.choices[0].message.content;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  parsed = {\n    category: \"other\",\n    priority: \"medium\",\n    requires_human: true,\n    confidence: 0,\n    reasoning: \"Failed to parse LLM output: \" + raw\n  };\n}\n\n// Merge classification with the original email data\nconst emailData = $('Code in JavaScript').item.json;\n\nreturn {\n  json: {\n    ...emailData,\n    category: parsed.category,\n    priority: parsed.priority,\n    requires_human: parsed.requires_human,\n    confidence: parsed.confidence,\n    reasoning: parsed.reasoning\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -48,
+        -48
+      ],
+      "id": "0f9a01f6-dd37-43db-8107-6fd2250c6071",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "=   {{ $json.category }}",
+                    "rightValue": "   spam",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "7bc65827-0e72-4f66-b8db-0c3bb49dc8d1"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Spam"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "f7f59400-475a-40b5-ab02-ad4c6da03218",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "general_query",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "RAG"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "3df0b955-35bd-4ae9-afea-44011a461100",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "sales_inquiry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "RAG"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "8a3c7a34-60a6-436e-a8c8-1d5ace13840a",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "job_application",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "HR"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "21f7341c-e00e-40e3-a236-079f7c17ffdc",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "project_related",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Manager"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5afaad62-f579-4963-91e8-e04bd24b43b1",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "internal_communication",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Manager"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "aa32f28e-994d-4dff-98f0-96c7412f9141",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "complaint",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Manager"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "6f270b8f-ac46-4e3e-833c-80c797590322",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "meeting_request",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Meeting"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "94587780-f444-4c5e-bff9-34f2d2deb587",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "urgent_request",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Urgent"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "36edea7a-4fbe-4e76-989d-e5c338ea89da",
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "promotional",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Archive"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        128,
+        -160
+      ],
+      "id": "1c04a87a-ec0e-4b62-81cf-d82cbc8eed57",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $('Code in JavaScript').item.json.gmail_id }}",
+        "labelIds": [
+          "SPAM"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        624,
+        -864
+      ],
+      "id": "6cfd5275-a775-4d72-9833-98702fae9b36",
+      "name": "Add label to message",
+      "webhookId": "7cf4de78-3c11-4c06-95fd-bbf079295f0f",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "wC9WzILzlNGljVDT",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "sumbalnaseer26@gmail.com",
+        "subject": "=   New Job Application: {{ $('Code in JavaScript').item.json.subject }}",
+        "message": "=   A new job application has been received and requires review.\n\n   Candidate: {{ $('Code in JavaScript').item.json.sender_name }}\n   Email: {{ $('Code in JavaScript').item.json.sender_email }}\n   Subject: {{ $('Code in JavaScript').item.json.subject }}\n   Priority: {{ $json.priority }}\n\n   Original message:\n   {{ $('Code in JavaScript').item.json.body }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        976,
+        -512
+      ],
+      "id": "c505347f-3c08-4ad2-ba9c-4f0c5647cf57",
+      "name": "Send a message",
+      "webhookId": "cf625c57-e9fb-495e-90d4-075132c26044",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "wC9WzILzlNGljVDT",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1549794625210945566/xKnc_fwVYcMRodOwW_yYlluRHNVPejxbedEoTHHdcrWi9iXUHusocJM1l7Cqcs2T7Yf6",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"🔔 New Job Application\\nCandidate: {{ $('Code in JavaScript').item.json.sender_name }} | Email: {{ $('Code in JavaScript').item.json.sender_email }}\\nSubject: {{ $('Code in JavaScript').item.json.subject }}\\nPriority: {{ $('Code in JavaScript1').item.json.priority }}\\n\\nForwarded to HR.\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1200,
+        -592
+      ],
+      "id": "768f7803-bbf3-432a-ab73-084fb70bf42c",
+      "name": "HTTP Request1"
+    },
+    {
+      "parameters": {
+        "sendTo": "sumbalnaseer26@gmail.com",
+        "subject": "=Project/Internal Email: {{ $('Code in JavaScript').item.json.subject }}",
+        "message": "=This email requires managerial review.  From: {{ $('Code in JavaScript').item.json.sender_email }} Subject: {{ $('Code in JavaScript').item.json.subject }} Priority: {{ $('Code in JavaScript1').item.json.priority }} Reasoning: {{ $('Code in JavaScript1').item.json.reasoning }}  Original message: {{ $('Code in JavaScript').item.json.body }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1072,
+        -320
+      ],
+      "id": "53d67d49-836c-46db-9d8d-6e929f11cac5",
+      "name": "Send a message1",
+      "webhookId": "15412a1c-a9d3-4760-bfab-52b6314e3aca",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "wC9WzILzlNGljVDT",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/1549794769205465189/F6MLMwhZyFDrOJqIc7mwp5mLQ7CEte257OCa8J56h9u7VRmqzlXUorBkGhIQA028GSe9",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"🚨 URGENT — Immediate Attention Required\\nFrom: {{ $('Code in JavaScript').item.json.sender_email }}\\nSubject: {{ $('Code in JavaScript').item.json.subject }}\\nReasoning: {{ $('Code in JavaScript1').item.json.reasoning }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1312,
+        -432
+      ],
+      "id": "68c278ae-36c2-41b3-b82a-8302cd727741",
+      "name": "HTTP Request2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "   https://discord.com/api/webhooks/1549794874524434462/h6rA99iYZrZaFCTtkiXjF_8vfookulBmTwPaY6LiCZLIWVMjMRm-I_nktnWr9aJNUoIy",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"🚨 URGENT — Immediate Attention Required\\nFrom: {{ $('Code in JavaScript').item.json.sender_email }}\\nSubject: {{ $('Code in JavaScript').item.json.subject }}\\nReasoning: {{ $('Code in JavaScript1').item.json.reasoning }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1472,
+        -48
+      ],
+      "id": "909dc726-a017-41f2-8abd-6279f50e99f0",
+      "name": "HTTP Request3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "   https://discord.com/api/webhooks/1549794769205465189/F6MLMwhZyFDrOJqIc7mwp5mLQ7CEte257OCa8J56h9u7VRmqzlXUorBkGhIQA028GSe9",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"📅 Meeting Request\\nFrom: {{ $('Code in JavaScript').item.json.sender_email }}\\nSubject: {{ $('Code in JavaScript').item.json.subject }}\\n\\nNeeds human scheduling — no auto-reply sent.\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1312,
+        -192
+      ],
+      "id": "15301177-17e5-41d5-a829-4e8cb7083b04",
+      "name": "HTTP Request4"
+    },
+    {
+      "parameters": {
+        "operation": "removeLabels",
+        "messageId": "=   {{ $('Code in JavaScript').item.json.gmail_id }}",
+        "labelIds": [
+          "INBOX"
+        ]
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1216,
+        112
+      ],
+      "id": "b84cd0fe-ddd8-48cc-9494-885717d0ede6",
+      "name": "Remove label from message",
+      "webhookId": "3b829ebb-f374-4f2a-9dc2-9f4ba1ff0002",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "wC9WzILzlNGljVDT",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "   https://discord.com/api/webhooks/1549794769205465189/F6MLMwhZyFDrOJqIc7mwp5mLQ7CEte257OCa8J56h9u7VRmqzlXUorBkGhIQA028GSe9",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"❓ Unclassified/Low-confidence Email — needs human review\\nFrom: {{ $('Code in JavaScript').item.json.sender_email }}\\nSubject: {{ $('Code in JavaScript').item.json.subject }}\\nCategory guess: {{ $('Code in JavaScript1').item.json.category }} (confidence: {{ $('Code in JavaScript1').item.json.confidence }})\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1360,
+        288
+      ],
+      "id": "9fcd2d8d-765a-478c-9952-4805735a1810",
+      "name": "HTTP Request5"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/api/chat/sessions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"title\": \"Email Query - {{ $('Code in JavaScript').item.json.subject }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        848,
+        -688
+      ],
+      "id": "4aca36d6-f7ff-437f-9035-97a02ddf9b75",
+      "name": "HTTP Request6"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/api/chat/message",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"session_id\": \"{{ $json.session_id }}\",\n  \"question\": \"{{ $('Code in JavaScript').item.json.body_escaped }}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1056,
+        -800
+      ],
+      "id": "8ce7855a-85b7-4497-bae9-38971f922128",
+      "name": "HTTP Request7"
+    },
+    {
+      "parameters": {
+        "operation": "reply",
+        "messageId": "={{ $('Code in JavaScript').item.json.gmail_id }}",
+        "message": "={{ $json.answer }}  --- This is an automated response based on our knowledge base.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1280,
+        -960
+      ],
+      "id": "8189dbfa-a366-4444-bca6-cc76723f6651",
+      "name": "Reply to a message",
+      "webhookId": "315acd05-d89b-4587-aeb7-f2a6db643667",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "wC9WzILzlNGljVDT",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "labeled_spam",
+            "rag_used": "false",
+            "response_sent": "false",
+            "forwarded_to": "none",
+            "status_error": "none",
+            "discord_status": "n/a"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        880,
+        -944
+      ],
+      "id": "e20c4f57-13aa-44f8-99ef-473c19de0bef",
+      "name": "Append row in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "forwarded_to_hr",
+            "rag_used": "false",
+            "response_sent": "false",
+            "forwarded_to": "hr",
+            "discord_status": "sent",
+            "status_error": "none"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1440,
+        -736
+      ],
+      "id": "658e0822-813e-49ce-8b45-89b3e2f62e57",
+      "name": "Append row in sheet1",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "forwarded_to_manager",
+            "rag_used": "false",
+            "response_sent": "false",
+            "forwarded_to": "manager",
+            "discord_status": "sent ",
+            "status_error": "none"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1520,
+        -528
+      ],
+      "id": "49f8ee46-adee-4fda-9142-15da7e23a0e6",
+      "name": "Append row in sheet2",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "notified_responsible_person",
+            "rag_used": "false",
+            "response_sent": "false",
+            "forwarded_to": "none",
+            "discord_status": "sent",
+            "status_error": "none"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1584,
+        -336
+      ],
+      "id": "ebfa117c-b7d3-4135-bbdf-f9e79dae1fa0",
+      "name": "Append row in sheet3",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "urgent_alert_sent",
+            "rag_used": "false",
+            "response_sent": "false",
+            "forwarded_to": "none",
+            "discord_status": "sent",
+            "status_error": "none"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1680,
+        -176
+      ],
+      "id": "ecfe566c-4dca-4470-88ae-e2b3b694b8f5",
+      "name": "Append row in sheet4",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "archived",
+            "rag_used": "false",
+            "response_sent": "false",
+            "forwarded_to": "none",
+            "status_error": "none",
+            "discord_status": "n/a"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1632,
+        112
+      ],
+      "id": "0e317e6a-144a-4dbc-92aa-1f19e931c616",
+      "name": "Append row in sheet5",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "flagged_for_human_review",
+            "rag_used": "false",
+            "response_sent": "false",
+            "forwarded_to": "none",
+            "discord_status": "sent",
+            "status_error": "none"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1568,
+        288
+      ],
+      "id": "fb1c926f-8733-40c6-b2a3-ba0de46b8031",
+      "name": "Append row in sheet6",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1bQF08801yjl2Uo8P_LKmy9VWk_S8E__vlzHlOJ_7en8/edit?gid=0#gid=0",
+          "mode": "url"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now }}",
+            "message_id": "={{ $('Code in JavaScript').item.json.message_id }}",
+            "thread_id": "={{ $('Code in JavaScript').item.json.thread_id }}",
+            "sender": "={{ $('Code in JavaScript').item.json.sender_email }}",
+            "subject": "={{ $('Code in JavaScript').item.json.subject }}",
+            "category": "={{ $('Code in JavaScript1').item.json.category }}",
+            "priority": "={{ $('Code in JavaScript1').item.json.priority }}",
+            "confidence": "={{ $('Code in JavaScript1').item.json.confidence }}",
+            "requires_human": "={{ $('Code in JavaScript1').item.json.requires_human }}",
+            "action_taken": "rag_reply_sent",
+            "rag_used": "true",
+            "response_sent": "true",
+            "discord_status": "n/a",
+            "status_error": "none",
+            "forwarded_to": "none"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "message_id",
+              "displayName": "message_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "thread_id",
+              "displayName": "thread_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sender",
+              "displayName": "sender",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "category",
+              "displayName": "category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "requires_human",
+              "displayName": "requires_human",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "action_taken",
+              "displayName": "action_taken",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "rag_used",
+              "displayName": "rag_used",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "response_sent",
+              "displayName": "response_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "forwarded_to",
+              "displayName": "forwarded_to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "discord_status",
+              "displayName": "discord_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status_error",
+              "displayName": "status_error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1488,
+        -960
+      ],
+      "id": "570f767e-2db1-46e8-bd4d-885f9e8fe943",
+      "name": "Append row in sheet7",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "geljuyVGTMrbo9wk",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Get row(s) in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s) in sheet": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Add label to message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request6",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request6",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request4",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Remove label from message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request6": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request7": {
+      "main": [
+        [
+          {
+            "node": "Reply to a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add label to message": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request1": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request2": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request4": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request3": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove label from message": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request5": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reply to a message": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "37b9cfbc-2330-4898-badc-80a62072017c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "862e2bd24c2b71d83bf74e1a3b609f65783e4495fd54b184452613f3fca3082c"
+  },
+  "nodeGroups": [],
+  "id": "3ptI31F4nzO9VX3D",
+  "tags": []
+}
